@@ -81,12 +81,17 @@ class ConnectionManager(object):
 
         try:
             r = requests.post(url, data=req)
+            # this mean the password is not allowed, i must check before raise_for_status to not destroy response
+            if r.status_code == 403:
+                return {'improvements': json.loads(r.text)}
+            elif r.status_code == 409:
+                return {'content': 'Error! User already existent!'}
             r.raise_for_status()
         except ConnectionManager.EXCEPTIONS_CATCHED as e:
             self.logger.error('do_register: URL: {} - EXCEPTION_CATCHED: {} '.format(url, e))
+            return {'content': 'Error during registration:\n{}'.format(e)}
         else:
-            return r.text
-        return False
+            return {'content': json.loads(r.text)}
 
     def do_activate(self, data):
         """
@@ -189,7 +194,6 @@ class ConnectionManager(object):
             self.logger.error('{}: URL: {} - EXCEPTION_CATCHED: {} '.format('do_delete', url, e))
         else:
             event_timestamp = json.loads(r.text)
-
             return event_timestamp
         return False
 
@@ -211,17 +215,18 @@ class ConnectionManager(object):
     def do_get_server_snapshot(self, data):
         url = self.files_url
 
+
         self.logger.info('{}: URL: {} - DATA: {} '.format('do_get_server_snapshot', url, data))
+
         try:
             r = requests.get(url, auth=self.auth)
             r.raise_for_status()
         except ConnectionManager.EXCEPTIONS_CATCHED as e:
+
             self.logger.error('{}: URL: {} - EXCEPTION_CATCHED: {} '.format('do_get_server_snapshot', url, e))
+
         else:
             return json.loads(r.text)
-
-    # logging.info('ConnectionManager: do_reguser: URL: {} - DATA: {} '.format(url, data))
-    # logging.error('ConnectionManager: do_reguser: URL: {} - EXCEPTIONS_CATCHED: {} '.format(url, e))
 
     def _default(self, method):
         print 'Received Unknown Command:', method
