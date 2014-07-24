@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import time
 import string
+
 join = os.path.join
 normpath = os.path.normpath
 abspath = os.path.abspath
@@ -20,6 +21,7 @@ from flask.ext.restful import Resource, Api
 from flask.ext.mail import Mail, Message
 from werkzeug import secure_filename
 from passlib.hash import sha256_crypt
+import passwordmeter
 
 __title__ = 'PyBOX'
 
@@ -48,6 +50,8 @@ LAST_SERVER_TIMESTAMP = 'server_timestamp'
 PWD = 'password'
 USER_CREATION_TIME = 'creation_timestamp'
 DEFAULT_USER_DIRS = ('Misc', 'Music', 'Photos', 'Projects', 'Work')
+
+UNWANTED_PASS = 'words'
 
 
 class ServerError(Exception):
@@ -98,6 +102,22 @@ EMAIL_SETTINGS_FILEPATH = join(os.path.dirname(__file__),
 api = Api(app)
 auth = HTTPBasicAuth()
 
+def update_passwordmeter_terms(terms_file):
+    """
+    Added costume terms list into passwordmeter from words file
+    :return:
+    """
+    costume_password = set()
+    try:
+        with open(terms_file, 'rb') as terms_file:
+            for term in terms_file:
+                costume_password.add(term)
+    except IOError:
+        logging.info('Impossible to load file ! loaded default setting.')
+    else:
+        passwordmeter.common10k = passwordmeter.common10k.union(costume_password)
+    finally:
+        del costume_password
 
 def _read_file(filename):
     """
@@ -106,6 +126,7 @@ def _read_file(filename):
     with open(filename, 'rb') as f:
         content = f.read()
     return content
+
 
 def check_path(path, username):
     """
@@ -139,18 +160,20 @@ def userpath2serverpath(username, path=''):
 def now_timestamp():
     """
     Return the current server timestamp as an int.
-    :return: int
+    :return: long
     """
-    return int(time.time())
+    return long(time.time()*10000)
+
 
 def file_timestamp(filepath):
     """
-    Return the int of last modification timestamp of <filepath> (i.e. int(os.path.getmtime(filepath))).
+    Return the long of last modification timestamp of <filepath> (i.e. long(os.path.getmtime(filepath))).
 
     :param filepath: str
-    :return: int
+    :return: long
     """
-    return int(os.path.getmtime(filepath))
+
+    return long(os.path.getmtime(filepath)*10000)
 
 
 def _encrypt_password(password):
@@ -186,7 +209,7 @@ def init_user_directory(username, default_dirs=DEFAULT_USER_DIRS):
     os.makedirs(dirpath)
 
     welcome_file = join(dirpath, 'WELCOME')
-    with open(welcome_file, 'w') as fp:
+    with open(welcome_file, 'wb') as fp:
         fp.write('Welcome to %s, %s!\n' % (__title__, username))
 
     for dirname in default_dirs:
@@ -195,7 +218,7 @@ def init_user_directory(username, default_dirs=DEFAULT_USER_DIRS):
         os.mkdir(subdirpath)
         # Create a default file for each default directory
         # beacuse wee need files to see the directories.
-        with open(filepath, 'w') as fp:
+        with open(filepath, 'wb') as fp:
             fp.write('{} {}\n'.format(username, dirname))
     logger.info('{} created'.format(dirpath))
     return compute_dir_state(dirpath)
@@ -258,7 +281,7 @@ def create_user(username, password):
     """
     # Example of creation using requests:
     # requests.post('http://127.0.0.1:5000/API/V1/signup',
-    #               data={'username': 'Pippo', 'password': 'ciao'})
+    # data={'username': 'Pippo', 'password': 'ciao'})
     logger.debug('Creating user...')
     if username and password:
         if username in userdata:
@@ -268,7 +291,7 @@ def create_user(username, password):
             enc_pass = _encrypt_password(password)
 
             temp = init_user_directory(username)
-            last_server_timestamp, dir_snapshot = temp[LAST_SERVER_TIMESTAMP],temp[SNAPSHOT]
+            last_server_timestamp, dir_snapshot = temp[LAST_SERVER_TIMESTAMP], temp[SNAPSHOT]
 
             single_user_data = {USER_CREATION_TIME: now_timestamp(),
                                 PWD: enc_pass,
@@ -337,6 +360,7 @@ class UsersFacility(Resource):
     """
     Debug facility/backdoor to get all users (and pending users) info and without authentication.
     """
+
     def get(self, username):
         """
         Show some info about users.
@@ -351,7 +375,7 @@ class UsersFacility(Resource):
                 pending_users_listr = ', '.join(pending_users.keys())
             else:
                 pending_users_listr = 'no pending users'
-            response = 'Registered users: {}. Pending users: {}'.format(reg_users_listr, pending_users_listr),\
+            response = 'Registered users: {}. Pending users: {}'.format(reg_users_listr, pending_users_listr), \
                        HTTP_OK
         else:
             if username in userdata:
@@ -390,7 +414,7 @@ class Users(Resource):
             user_data = userdata[username]
             creation_timestamp = user_data.get(USER_CREATION_TIME)
             if creation_timestamp:
-                time_str = time.strftime('%Y-%m-%d at %H:%M:%S', time.localtime(creation_timestamp))
+                time_str = time.strftime('%Y-%m-%d at %H:%M:%S', time.localtime(creation_timestamp/10000.0))
             else:
                 time_str = '<unknown time>'
             # TODO: return json?
@@ -408,7 +432,9 @@ class Users(Resource):
             abort(HTTP_CONFLICT)
 
         password = request.form['password']
-
+        strength, improvements = passwordmeter.test(password)
+        if strength <= 0.5:
+            return improvements, HTTP_FORBIDDEN
         activation_code = os.urandom(16).encode('hex')
 
         # Composing email
@@ -515,19 +541,18 @@ class Actions(Resource):
 
         abspath = os.path.abspath(join(FILE_ROOT, username, filepath))
 
-        if not os.path.isfile(abspath):
-            abort(HTTP_NOT_FOUND)
-
         try:
             os.remove(abspath)
         except OSError:
+            # This error raises when the file is missing
             abort(HTTP_NOT_FOUND)
         self._clear_dirs(os.path.dirname(abspath), username)
-        # file deleted, last_server_timestamp is set to current timestamp
 
+        # file deleted, last_server_timestamp is set to current timestamp
         last_server_timestamp = now_timestamp()
         userdata[username][LAST_SERVER_TIMESTAMP] = last_server_timestamp
         userdata[username]['files'].pop(normpath(filepath))
+        save_userdata()
         return jsonify({LAST_SERVER_TIMESTAMP: last_server_timestamp})
 
     def _copy(self, username):
@@ -553,9 +578,11 @@ class Actions(Resource):
             abort(HTTP_NOT_FOUND)
 
         last_server_timestamp = file_timestamp(server_dst)
+
         _, md5 = userdata[username]['files'][normpath(src)]
         userdata[username][LAST_SERVER_TIMESTAMP] = last_server_timestamp
         userdata[username]['files'][normpath(dst)] = [last_server_timestamp, md5]
+        save_userdata()
         return jsonify({LAST_SERVER_TIMESTAMP: last_server_timestamp})
 
     def _move(self, username):
@@ -580,11 +607,13 @@ class Actions(Resource):
         self._clear_dirs(os.path.dirname(server_src), username)
 
 
-        last_server_timestamp = file_timestamp(server_dst)
+        last_server_timestamp = now_timestamp()
+
         _, md5 = userdata[username]['files'][normpath(src)]
         userdata[username][LAST_SERVER_TIMESTAMP] = last_server_timestamp
         userdata[username]['files'].pop(normpath(src))
         userdata[username]['files'][normpath(dst)] = [last_server_timestamp, md5]
+        save_userdata()
         return jsonify({LAST_SERVER_TIMESTAMP: last_server_timestamp})
 
     def _clear_dirs(self, path, root):
@@ -618,6 +647,7 @@ def calculate_file_md5(fp, chunk_len=2 ** 16):
         else:
             break
     res = h.hexdigest()
+    fp.seek(0)
     return res
 
 
@@ -630,7 +660,7 @@ def compute_dir_state(root_path):  # TODO: make function accepting just an usern
     :return: dict.
     """
     snapshot = {}
-    last_timestamp = 0
+    last_timestamp = now_timestamp()
     for dirpath, dirs, files in os.walk(root_path):
         for filename in files:
             filepath = join(dirpath, filename)
@@ -642,10 +672,7 @@ def compute_dir_state(root_path):  # TODO: make function accepting just an usern
             except OSError as err:
                 logging.warn('calculate_file_md5("{}") --> {}'.format(filepath, err))
             else:
-                timestamp = file_timestamp(filepath)
-                if timestamp > last_timestamp:
-                    last_timestamp = timestamp
-                snapshot[filepath[len(root_path) + 1:]] = [timestamp, md5]
+                snapshot[filepath[len(root_path) + 1:]] = [last_timestamp, md5]
     state = {LAST_SERVER_TIMESTAMP: last_timestamp,
              SNAPSHOT: snapshot}
     return state
@@ -655,6 +682,7 @@ class Files(Resource):
     """
     Class that handle files as web resources.
     """
+
     @auth.login_required
     def get(self, path=''):
         """
@@ -666,11 +694,12 @@ class Files(Resource):
         logger.debug('Files.get({})'.format(repr(path)))
         username = auth.username()
         user_rootpath = join(FILE_ROOT, username)
+
         if path:
             # Download the file specified by <path>.
             dirname = join(user_rootpath, os.path.dirname(path))
 
-            if not check_path(dirname, username):
+            if not check_path(path, username):
                 abort(HTTP_FORBIDDEN)
 
             if not os.path.exists(dirname):
@@ -720,8 +749,8 @@ class Files(Resource):
         filepath = userpath2serverpath(username, path)
         last_server_timestamp = file_timestamp(filepath)
         userdata[username][LAST_SERVER_TIMESTAMP] = last_server_timestamp
-        userdata[username]['files'][normpath(path)] = [last_server_timestamp, calculate_file_md5(open(filepath))]
-        save_userdata()
+        userdata[username]['files'][normpath(path)] = [last_server_timestamp, calculate_file_md5(open(filepath, 'rb'))]
+        save_userdata()    
         return last_server_timestamp
 
     @auth.login_required
@@ -733,14 +762,20 @@ class Files(Resource):
         :param path: str
         """
         username = auth.username()
+
         upload_file = request.files['file']
+        md5 = request.form['md5']
         dirname, filename = self._get_dirname_filename(path)
+
+        if calculate_file_md5(upload_file) != md5:
+            abort(HTTP_CONFLICT)
 
         if not os.path.exists(dirname):
             os.makedirs(dirname)
         else:
             if os.path.isfile(join(dirname, filename)):
                 abort(HTTP_FORBIDDEN)
+
         filepath = join(dirname, filename)
         upload_file.save(filepath)
 
@@ -761,9 +796,13 @@ class Files(Resource):
         """
         username = auth.username()
         upload_file = request.files['file']
+        md5 = request.form['md5']
         dirname, filename = self._get_dirname_filename(path)
-        filepath = join(dirname, filename)
 
+        if calculate_file_md5(upload_file) != md5:
+            abort(HTTP_CONFLICT)
+
+        filepath = join(dirname, filename)
         if os.path.isfile(filepath):
             upload_file.save(filepath)
         else:
@@ -796,7 +835,8 @@ def main():
     parser.add_argument('-v', '--verbosity', const=1, default=1, type=int, choices=range(5), nargs='?',
                         help='set console verbosity: 0=CRITICAL, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG. \
                         [default: %(default)s]. Ignored if --verbose or --debug option is set.')
-    parser.add_argument('-H', '--host', default='0.0.0.0', help='set host address to run the server. [default: %(default)s].')
+    parser.add_argument('-H', '--host', default='0.0.0.0',
+                        help='set host address to run the server. [default: %(default)s].')
     args = parser.parse_args()
 
     if args.debug:
@@ -814,6 +854,8 @@ def main():
     if not os.path.exists(EMAIL_SETTINGS_FILEPATH):
         # ConfigParser.ConfigParser.read doesn't tell anything if the email configuration file is not found.
         raise ServerConfigurationError('Email configuration file "{}" not found!'.format(EMAIL_SETTINGS_FILEPATH))
+
+    update_passwordmeter_terms(UNWANTED_PASS)
 
     userdata.update(load_userdata())
     init_root_structure()
